@@ -1,0 +1,4 @@
+faiss-gpu
+sentence_transformers
+pandas
+dspy

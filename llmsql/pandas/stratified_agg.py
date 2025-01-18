@@ -56,7 +56,6 @@ class StratifiedLLMEstimator:
                         mean = np.mean(field_values)
                         if mean != 0:
                             cv = np.std(field_values) / abs(mean)
-                            print(f"cluster_id: {cluster_id}, cv: {cv}")
                             if cv > self.cv_threshold:
                                 problematic_clusters.add(cluster_id)
                                 break

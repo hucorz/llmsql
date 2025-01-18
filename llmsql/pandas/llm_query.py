@@ -1,5 +1,3 @@
-from typing import Optional
-
 import pandas as pd
 
 from ..llm import LLM
@@ -10,7 +8,7 @@ from .stratified_agg import StratifiedLLMEstimator
 class LLMQuery:
     """Pandas accessor for LLM operations"""
 
-    _llm: Optional[LLM] = None
+    _llm: LLM = None
 
     def __init__(self, pandas_obj):
         if self._llm is None:
@@ -23,6 +21,8 @@ class LLMQuery:
 
     def create_index(
         self,
+        n_clusters: int = 5,
+        cv_threshold: float = 1,
         sample_ratio: float = 0.2,
     ):
         """Configure LLM estimator"""
@@ -30,6 +30,8 @@ class LLMQuery:
             llm=self._llm,
             texts=self._obj,
             sample_ratio=sample_ratio,
+            cv_threshold=cv_threshold,
+            n_clusters=n_clusters,
         )
 
     def map(self, query: str) -> pd.Series | pd.DataFrame:
@@ -50,7 +52,7 @@ class LLMQuery:
 
         return pd.DataFrame(results, index=self._obj.index)
 
-    def sum(self, query: str, approx: bool = False) -> float | dict[str, float]:
+    def sum(self, query: str, approx: bool = False, adjust: bool = True) -> float | dict[str, float]:
         """
         Calculate sum using either approximation or full query
 
@@ -77,7 +79,7 @@ class LLMQuery:
                 raise ValueError(
                     "Please configure LLM estimator first using .configure()"
                 )
-            estimate = self._estimator.estimate(query, fields)
+            estimate = self._estimator.estimate(query, fields, adjust)
             result = {field: estimate[field] * len(self._obj) for field in fields}
         else:
             result = self._query_all(query, fields)

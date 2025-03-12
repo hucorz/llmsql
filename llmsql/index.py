@@ -12,67 +12,96 @@ class TextIndex:
             cache_folder="/fs/fast/share/pingtai_cc/models/huggingface/",
         )
         self.embeddings = self.model.encode(texts)
-        self.clusters: dict[int, list[int]] = None
-        self._create_index(n_clusters)
+        self.clusters = self._init_cluster(n_clusters)
+        self.sim_threshold = 0.85
 
-    def adjust(self, cluster_id: int) -> None:
-        """Split target cluster into two sub-clusters
-
-        Args:
-            cluster_id: ID of the cluster to split
-        """
-        if cluster_id not in self.clusters:
-            raise ValueError(f"Cluster {cluster_id} not found")
+    def adjust(
+        self,
+        cluster_id: int,
+        sampled_indices: list[int],
+        sampled_results: list,
+        mean: float,
+    ):
+        """调整有问题的聚类，将少数结果及其相似样本分离出来"""
+        print(f"\n[Cluster {cluster_id}]")
+        print(
+            f"样本: {len(sampled_indices)}/{len(self.clusters[cluster_id])} (抽样/总数)"
+        )
+        print(f"均值: {mean:.4f}")
 
         cluster_indices = self.clusters[cluster_id]
-        if len(cluster_indices) < 2:
-            return
+        is_true_minority = mean < 0.5
 
-        labels = self._cluster(self.embeddings[cluster_indices])
+        # 从原集群中取出少数派样本的嵌入向量
+        minor_indices = [
+            idx
+            for idx, res in zip(sampled_indices, sampled_results)
+            if res == is_true_minority
+        ]
+        major_indices = [idx for idx in cluster_indices if idx not in minor_indices]
+        print(f"少数派: {len(minor_indices)}/{len(sampled_indices)} (少数派/样本数)")
 
-        new_clusters = self.clusters.copy()
+        # 为每个少数派样本找出相似的多数派样本
+        similar_major_indices = self._find_similar_indices(minor_indices, major_indices)
+        new_cluster_indices = minor_indices + similar_major_indices
+
+        # 更新聚类
         next_cluster_id = max(self.clusters.keys()) + 1
-
-        new_clusters[cluster_id] = [
-            idx for i, idx in enumerate(cluster_indices) if labels[i] == 0
+        self.clusters[cluster_id] = [
+            idx for idx in cluster_indices if idx not in new_cluster_indices
         ]
-        new_clusters[next_cluster_id] = [
-            idx for i, idx in enumerate(cluster_indices) if labels[i] == 1
-        ]
+        self.clusters[next_cluster_id] = new_cluster_indices
 
-        self.clusters = new_clusters
+        print(
+            f"分裂: {len(cluster_indices)} -> {len(self.clusters[cluster_id])} + {len(new_cluster_indices)}"
+        )
 
-    def _create_index(self, n_clusters: int = 5) -> None:
+    def _find_similar_indices(self, minor_indices: list[int], major_indices: list[int]):
+        """使用Faiss加速相似度搜索"""
+        minor_embeddings = self.embeddings[minor_indices]
+        major_embeddings = self.embeddings[major_indices]
+
+        # 归一化向量，这样内积就等于余弦相似度
+        faiss.normalize_L2(major_embeddings)
+        faiss.normalize_L2(minor_embeddings)
+
+        # 创建Faiss索引
+        dimension = major_embeddings.shape[1]
+        index = faiss.IndexFlatIP(dimension)
+
+        index.add(np.ascontiguousarray(major_embeddings))
+
+        D, I = index.search(
+            np.ascontiguousarray(minor_embeddings),
+            len(major_indices),
+        )
+
+        # 收集相似度大于阈值的索引
+        similar_majority_indices = []
+        for distances, indices in zip(D, I):
+            similar_idx = [
+                major_indices[i]
+                for i, d in zip(indices, distances)
+                if d > self.sim_threshold
+            ]
+            similar_majority_indices.extend(similar_idx)
+
+        return list(set(similar_majority_indices))
+
+    def _init_cluster(self, n_clusters: int = 5):
         """Create initial clustering"""
-
-        labels = self._cluster(self.embeddings, n_clusters)
-        self.clusters = {
-            i: np.where(labels == i)[0].tolist() for i in range(n_clusters)
-        }
-
-    def _cluster(self, embeddings: np.ndarray, n_clusters: int = 2) -> np.ndarray:
-        """Cluster embeddings into n groups using Faiss KMeans
-
-        Args:
-            embeddings: Input embeddings array
-            n_clusters: Number of clusters (default: 2)
-
-        Returns:
-            np.ndarray: Cluster labels for each embedding
-        """
-        dimension = embeddings.shape[1]
+        dimension = self.embeddings.shape[1]
         kmeans = faiss.Kmeans(dimension, n_clusters, niter=20, verbose=False)
-        embeddings_array = np.ascontiguousarray(embeddings.astype("float32"))
+
+        embeddings_array = np.ascontiguousarray(self.embeddings.astype("float32"))
         kmeans.train(embeddings_array)
 
         _, labels = kmeans.index.search(embeddings_array, 1)
-        return labels.flatten()
+
+        return {i: np.where(labels == i)[0].tolist() for i in range(n_clusters)}
 
     def __iter__(self):
         """Iterate over stratum indices"""
-        if self.clusters is None:
-            raise ValueError("Index not created yet")
-
         for cls, stratum_indices in self.clusters.items():
             yield cls, stratum_indices
 

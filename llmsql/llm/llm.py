@@ -53,8 +53,7 @@ class LLM:
         fields, predictor = self._get_predictor(query)
         prediction = predictor(query=query, context=context)
 
-        extracted_fields = {
-            field_name: getattr(prediction, field_name) for field_name in fields
-        }
+        if len(fields) == 1:
+            return getattr(prediction, next(iter(fields)))
 
-        return extracted_fields
+        return {field_name: getattr(prediction, field_name) for field_name in fields}

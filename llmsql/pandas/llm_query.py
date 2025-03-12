@@ -22,7 +22,7 @@ class LLMQuery:
     def create_index(
         self,
         n_clusters: int = 5,
-        cv_threshold: float = 1,
+        threshold: float = 1,
         sample_ratio: float = 0.2,
     ):
         """Configure LLM estimator"""
@@ -30,7 +30,7 @@ class LLMQuery:
             llm=self._llm,
             texts=self._obj,
             sample_ratio=sample_ratio,
-            cv_threshold=cv_threshold,
+            threshold=threshold,
             n_clusters=n_clusters,
         )
 
@@ -46,13 +46,14 @@ class LLMQuery:
         """
         results = [self._llm(query=query, context=text) for text in self._obj]
 
-        if len(results[0]) == 1:
-            key = next(iter(results[0]))  # get the unique key
-            return pd.Series([r[key] for r in results], index=self._obj.index, name=key)
+        # if len(results[0]) == 1:
+        return pd.Series(results, index=self._obj.index)
 
-        return pd.DataFrame(results, index=self._obj.index)
+        # return pd.DataFrame(results, index=self._obj.index)
 
-    def sum(self, query: str, approx: bool = False, adjust: bool = True) -> float | dict[str, float]:
+    def sum(
+        self, query: str, approx: bool = False, adjust: bool = True
+    ) -> float | dict[str, float]:
         """
         Calculate sum using either approximation or full query
 
@@ -64,36 +65,12 @@ class LLMQuery:
             float | dict[str, float]: Sum of numeric fields. Single float for one field,
                                      dict of sums for multiple fields
         """
-        # Parse query to check field types
-        fields, _ = self._llm._parse_template(query)
-
-        for field_name, field_type in fields.items():
-            if field_type not in ("float", "int", "bool"):
-                raise ValueError(
-                    f"Field '{field_name}' of type '{field_type}' is not summable. "
-                    f"Only numeric types (float, int, bool) can be summed."
-                )
-
         if approx:
-            if self._estimator is None:
-                raise ValueError(
-                    "Please configure LLM estimator first using .configure()"
-                )
-            estimate = self._estimator.estimate(query, fields, adjust)
-            result = {field: estimate[field] * len(self._obj) for field in fields}
-        else:
-            result = self._query_all(query, fields)
+            estimate = self._estimator.estimate(query, adjust)
+            return estimate * len(self._obj)
 
-        # Return single value if only one field
-        if len(fields) == 1:
-            key = next(iter(result))
-            return result[key]
-        return result
+        return self._query_all(query)
 
-    def _query_all(self, query: str, fields: list[str]) -> dict[str, float]:
+    def _query_all(self, query: str) -> dict[str, float]:
         """Query all items without sampling"""
-        results = [self._llm(query=query, context=text) for text in self._obj]
-
-        sums = {field: sum(r[field] for r in results) for field in fields}
-
-        return sums
+        return sum(self._llm(query=query, context=text) for text in self._obj)

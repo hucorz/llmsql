@@ -12,23 +12,37 @@ class StratifiedLLMEstimator:
         self,
         llm: LLM,
         texts: pd.Series,
-        n_clusters: int = 5,
-        sample_ratio: float = 0.2,
-        threshold: float = 0.8,
+        n_clusters: int,
+        sample_ratio: float,
+        sim_threshold: float,
+        threshold: float,
     ):
         self.llm = llm
         self.texts = texts
-        self.text_index = TextIndex(texts, n_clusters=n_clusters)
+        self.text_index = TextIndex(
+            texts, n_clusters=n_clusters, sim_threshold=sim_threshold
+        )
         self.sample_ratio = sample_ratio
         self.threshold = threshold
 
-    def estimate(self, query: str, adjust: bool = True) -> dict[str, float]:
+    def estimate_without_cluster(self, query: str) -> dict[str, float]:
+        """Execute stratified estimation without cluster"""
+        total_size = len(self.texts)
+        n_samples = int(total_size * self.sample_ratio)
+        sampled_indices = np.random.choice(
+            list(range(total_size)), size=n_samples, replace=False
+        )
+        sampled_results = self._get_sampled_results(query, sampled_indices)
+
+        return np.mean(sampled_results)
+
+    def estimate(self, query: str, adjust: bool = True):
         """Execute stratified estimation"""
         total_size = len(self.texts)
         total_result = 0
         problematic_results = {}
 
-        for cluster_id, indices in self.text_index:
+        for cluster_id, indices in enumerate(self.text_index):
             n_samples, weight = self._get_stratum_samples(len(indices), total_size)
 
             sampled_indices = np.random.choice(indices, size=n_samples, replace=False)
@@ -57,7 +71,7 @@ class StratifiedLLMEstimator:
         n_samples = max(1, int(np.ceil(self.sample_ratio * cluster_size)))
         return n_samples, weight
 
-    def _get_sampled_results(self, query: str, sampled_indices: list[int]):
+    def _get_sampled_results(self, query: str, sampled_indices: list[int]) -> list:
         return [
             self.llm(query=query, context=self.texts.iloc[idx])
             for idx in sampled_indices

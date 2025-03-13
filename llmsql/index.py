@@ -5,7 +5,11 @@ from sentence_transformers import SentenceTransformer
 
 class TextIndex:
     def __init__(
-        self, texts, n_clusters: int = 5, embedding_model: str = "all-MiniLM-L6-v2"
+        self,
+        texts: list[str],
+        n_clusters: int,
+        sim_threshold: float,
+        embedding_model: str = "all-MiniLM-L6-v2",
     ):
         self.model = SentenceTransformer(
             embedding_model,
@@ -13,7 +17,7 @@ class TextIndex:
         )
         self.embeddings = self.model.encode(texts)
         self.clusters = self._init_cluster(n_clusters)
-        self.sim_threshold = 0.85
+        self.sim_threshold = sim_threshold
 
     def adjust(
         self,
@@ -32,7 +36,7 @@ class TextIndex:
         cluster_indices = self.clusters[cluster_id]
         is_true_minority = mean < 0.5
 
-        # 从原集群中取出少数派样本的嵌入向量
+        # 从原集群中取出少数样本的嵌入向量
         minor_indices = [
             idx
             for idx, res in zip(sampled_indices, sampled_results)
@@ -41,16 +45,15 @@ class TextIndex:
         major_indices = [idx for idx in cluster_indices if idx not in minor_indices]
         print(f"少数派: {len(minor_indices)}/{len(sampled_indices)} (少数派/样本数)")
 
-        # 为每个少数派样本找出相似的多数派样本
+        # 为每个少数样本找出相似的多数样本
         similar_major_indices = self._find_similar_indices(minor_indices, major_indices)
         new_cluster_indices = minor_indices + similar_major_indices
 
         # 更新聚类
-        next_cluster_id = max(self.clusters.keys()) + 1
         self.clusters[cluster_id] = [
             idx for idx in cluster_indices if idx not in new_cluster_indices
         ]
-        self.clusters[next_cluster_id] = new_cluster_indices
+        self.clusters.append(new_cluster_indices)
 
         print(
             f"分裂: {len(cluster_indices)} -> {len(self.clusters[cluster_id])} + {len(new_cluster_indices)}"
@@ -88,22 +91,19 @@ class TextIndex:
 
         return list(set(similar_majority_indices))
 
-    def _init_cluster(self, n_clusters: int = 5):
+    def _init_cluster(self, n_clusters: int = 5) -> list[list[int]]:
         """Create initial clustering"""
         dimension = self.embeddings.shape[1]
-        kmeans = faiss.Kmeans(dimension, n_clusters, niter=20, verbose=False)
+        kmeans = faiss.Kmeans(dimension, n_clusters, verbose=True)
 
         embeddings_array = np.ascontiguousarray(self.embeddings.astype("float32"))
         kmeans.train(embeddings_array)
 
         _, labels = kmeans.index.search(embeddings_array, 1)
 
-        return {i: np.where(labels == i)[0].tolist() for i in range(n_clusters)}
+        return [np.where(labels == i)[0].tolist() for i in range(n_clusters)]
 
     def __iter__(self):
         """Iterate over stratum indices"""
-        for cls, stratum_indices in self.clusters.items():
-            yield cls, stratum_indices
-
-    def __getitem__(self, key: int):
-        return self.clusters[key]
+        for indices in self.clusters:
+            yield indices

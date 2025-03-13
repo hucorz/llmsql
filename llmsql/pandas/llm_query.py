@@ -24,6 +24,7 @@ class LLMQuery:
         n_clusters: int = 5,
         threshold: float = 1,
         sample_ratio: float = 0.2,
+        sim_threshold: float = 0.8,
     ):
         """Configure LLM estimator"""
         self._estimator = StratifiedLLMEstimator(
@@ -31,6 +32,7 @@ class LLMQuery:
             texts=self._obj,
             sample_ratio=sample_ratio,
             threshold=threshold,
+            sim_threshold=sim_threshold,
             n_clusters=n_clusters,
         )
 
@@ -45,6 +47,11 @@ class LLMQuery:
             pd.Series | pd.DataFrame: Series for single field query, DataFrame for multiple fields
         """
         results = [self._llm(query=query, context=text) for text in self._obj]
+        # results = []
+        # for i, text in enumerate(self._obj):
+        #     result = self._llm(query=query, context=text)
+        #     results.append(result)
+        #     print(f"Processed {i+1}/{len(self._obj)}")
 
         # if len(results[0]) == 1:
         return pd.Series(results, index=self._obj.index)
@@ -52,7 +59,11 @@ class LLMQuery:
         # return pd.DataFrame(results, index=self._obj.index)
 
     def sum(
-        self, query: str, approx: bool = False, adjust: bool = True
+        self,
+        query: str,
+        approx: bool = False,
+        adjust: bool = True,
+        with_clusters: bool = True,
     ) -> float | dict[str, float]:
         """
         Calculate sum using either approximation or full query
@@ -67,6 +78,9 @@ class LLMQuery:
         """
         if approx:
             estimate = self._estimator.estimate(query, adjust)
+            return estimate * len(self._obj)
+        if not with_clusters:
+            estimate = self._estimator.estimate_without_cluster(query)
             return estimate * len(self._obj)
 
         return self._query_all(query)

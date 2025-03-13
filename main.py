@@ -56,6 +56,10 @@ def parse_args():
     parser.add_argument(
         "--threshold", type=float, default=0.8, help="CV threshold for clustering"
     )
+    
+    parser.add_argument(
+        "--sim-threshold", type=float, default=0.8, help="Similarity threshold for clustering"
+    )
 
     parser.add_argument("--n-clusters", type=int, default=5, help="Number of clusters")
 
@@ -98,6 +102,7 @@ def main():
         sample_ratio=args.sample_ratio,
         threshold=args.threshold,
         n_clusters=args.n_clusters,
+        sim_threshold=args.sim_threshold,
     )
 
     # 保存初始聚类
@@ -109,8 +114,15 @@ def main():
 
     print("\nRunning experiments...")
 
+    print("\n1. 不使用分层抽样...")
+    results_no_cluster = []
+    for i in range(args.n_trials):
+        results_no_cluster.append(texts.llm.sum(query, approx=False, adjust=False, with_clusters=False))
+        if (i + 1) % 10 == 0:
+            print(f"  {i + 1}/{args.n_trials} trials completed")
+    
     # 1. 不调整抽取 n_trials 次
-    print("\n1. 不调整抽样...")
+    print("\n2. 不调整抽样...")
     results_no_adjust = []
     for i in range(args.n_trials):
         results_no_adjust.append(texts.llm.sum(query, approx=True, adjust=False))
@@ -118,7 +130,7 @@ def main():
             print(f"  {i + 1}/{args.n_trials} trials completed")
 
     # 2. 调整一次
-    print(f"\n2. 执行{args.n_adjust}次调整...")
+    print(f"\n3. 执行{args.n_adjust}次调整...")
     for _ in range(args.n_adjust):
         texts.llm.sum(query, approx=True, adjust=True)
 
@@ -126,7 +138,7 @@ def main():
     adjusted_clusters = texts.llm._estimator.text_index.clusters.copy()
 
     # 3. 在调整后不调整抽取 n_trials 次
-    print("\n3. 调整后不调整抽样...")
+    print("\n4. 调整后不调整抽样...")
     results_after_adjust = []
     for i in range(args.n_trials):
         results_after_adjust.append(texts.llm.sum(query, approx=True, adjust=False))
@@ -141,6 +153,7 @@ def main():
     # 计算并打印统计数据
     stats = {}
     for name, results in [
+        ("Without Clustering", results_no_cluster),
         ("Before Adjustment", results_no_adjust),
         ("After Adjustment", results_after_adjust),
     ]:
@@ -166,10 +179,10 @@ def main():
     print("=" * 50)
 
     ans = texts.llm.map(query)
-
+    print(f"\nTrue Results: {np.sum(ans)}")
     # 打印初始聚类的结果
     print("\nInitial Clusters:")
-    for cluster_id, indices in initial_clusters.items():
+    for cluster_id, indices in enumerate(initial_clusters):
         cluster_results = ans[indices].tolist()
         true_count = sum(1 for x in cluster_results if x)
         total = len(cluster_results)
@@ -181,7 +194,7 @@ def main():
 
     # 打印调整后聚类的结果
     print("\nAdjusted Clusters:")
-    for cluster_id, indices in adjusted_clusters.items():
+    for cluster_id, indices in enumerate(adjusted_clusters):
         cluster_results = ans[indices].tolist()
         true_count = sum(1 for x in cluster_results if x)
         total = len(cluster_results)

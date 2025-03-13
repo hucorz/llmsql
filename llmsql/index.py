@@ -18,8 +18,12 @@ class TextIndex:
         )
         self.max_clusters = max_clusters or int(np.sqrt(len(texts) / 2))
         self.embeddings = self.model.encode(texts)
+        self.dimension = self.embeddings.shape[1]
         self.clusters = self._init_cluster(n_clusters)
         self.sim_threshold = sim_threshold
+        self.cluster_embeddings = [
+            np.mean(self.embeddings[indices], axis=0) for indices in self.clusters
+        ]
 
     def adjust(
         self,
@@ -65,42 +69,61 @@ class TextIndex:
             idx for idx in cluster_indices if idx not in new_indices
         ]
         self.clusters.append(new_indices)
+
+        # 更新聚类embedding
+        self._update_cluster_embedding(cluster_id)
+        self.cluster_embeddings.append(np.mean(self.embeddings[new_indices], axis=0))
         print(
             f"分裂: {len(cluster_indices)} -> {len(self.clusters[cluster_id])} + {len(new_indices)}"
         )
 
     def _merge_clusters(self, cluster_id: int, new_indices: list[int]):
-        """合并一个类"""
-        # 找到除了原类之外最相似的类
+        """使用Faiss加速聚类合并"""
         cluster_indices = self.clusters[cluster_id]
-        new_cluster_embedding = np.mean(self.embeddings[new_indices], axis=0)
-        best_sim = -1
-        best_cluster = -1
+        new_cluster_embedding = np.mean(self.embeddings[new_indices], axis=0).reshape(1, -1)
 
-        for i, cluster in enumerate(self.clusters):
-            if i == cluster_id:  # 跳过原类
-                continue
-            cluster_embedding = np.mean(self.embeddings[cluster], axis=0)
-            sim = np.dot(new_cluster_embedding, cluster_embedding) / (
-                np.linalg.norm(new_cluster_embedding)
-                * np.linalg.norm(cluster_embedding)
-            )
-            if sim > best_sim:
-                best_sim = sim
-                best_cluster = i
+        # 收集所有其他聚类的平均嵌入向量
+        other_cluster_ids = [i for i in range(len(self.clusters)) if i != cluster_id]
+        other_clusters_embeddings = np.array(
+            [self.cluster_embeddings[i] for i in other_cluster_ids]
+        )
 
-        # 如果找到合适的类，就合并
+        # 转换为numpy数组并归一化
+        faiss.normalize_L2(other_clusters_embeddings)
+        faiss.normalize_L2(new_cluster_embedding)
+
+        # 创建Faiss索引
+        index = faiss.IndexFlatIP(self.dimension)
+        index.add(np.ascontiguousarray(other_clusters_embeddings))
+
+        D, I = index.search(
+            np.ascontiguousarray(new_cluster_embedding),
+            1,
+        )
+
+        best_sim = D[0][0]
+        best_cluster: int = other_cluster_ids[I[0][0]]
+
         if best_sim > self.sim_threshold:
-            # 更新原类
             self.clusters[cluster_id] = [
                 idx for idx in cluster_indices if idx not in new_indices
             ]
-            # 合并到最相似的类
             self.clusters[best_cluster].extend(new_indices)
-            print(f"合并: cluster_{best_cluster} += {len(new_indices)} samples")
+
+            # 更新两个聚类的embedding
+            self._update_cluster_embedding(cluster_id)
+            self._update_cluster_embedding(best_cluster)
+            print(
+                f"合并: cluster_{best_cluster}: {len(self.clusters[best_cluster]) - len(new_indices)} += {len(new_indices)} samples"
+            )
         else:
-            # 如果没有足够相似的类，就不进行分裂
             print("没有找到合适的目标类，保持原状")
+
+    def _update_cluster_embedding(self, cluster_id: int):
+        """更新指定聚类的平均embedding"""
+        self.cluster_embeddings[cluster_id] = np.mean(
+            self.embeddings[self.clusters[cluster_id]], axis=0
+        )
 
     def _find_similar_indices(self, minor_indices: list[int], major_indices: list[int]):
         """使用Faiss加速相似度搜索"""
@@ -112,9 +135,7 @@ class TextIndex:
         faiss.normalize_L2(minor_embeddings)
 
         # 创建Faiss索引
-        dimension = major_embeddings.shape[1]
-        index = faiss.IndexFlatIP(dimension)
-
+        index = faiss.IndexFlatIP(self.dimension)
         index.add(np.ascontiguousarray(major_embeddings))
 
         D, I = index.search(
@@ -136,8 +157,7 @@ class TextIndex:
 
     def _init_cluster(self, n_clusters: int = 5) -> list[list[int]]:
         """Create initial clustering"""
-        dimension = self.embeddings.shape[1]
-        kmeans = faiss.Kmeans(dimension, n_clusters, verbose=True)
+        kmeans = faiss.Kmeans(self.dimension, n_clusters, verbose=True)
 
         embeddings_array = np.ascontiguousarray(self.embeddings.astype("float32"))
         kmeans.train(embeddings_array)

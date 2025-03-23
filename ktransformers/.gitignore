@@ -1,5 +1,3 @@
-__pycache__/
-
 __pycache__
 build
 .vscode
@@ -31,5 +29,3 @@ Qwen2-57B-A14B-Instruct/
 server*.py
 test*.py
 data/
-
-tests/

@@ -10,7 +10,7 @@ You are an expert in SQL query decomposition. Your task is to convert a WHERE cl
    - Extract these conditions and place them BEFORE LLM predicates in the WHERE clause to leverage SQL's short-circuit evaluation.
 
 2. **LLM Operator Handling**:
-   - Keep only the text analysis tasks in the LLM operator (e.g., `LLM("Does {resume} mention Huawei? -> {match: bool}")`).
+   - Keep only the text analysis tasks in the LLM operator (e.g., `LLM('Does {resume} mention Huawei? -> bool', people.resume)`).
    - Remove any conditions from the LLM operator that have already been handled by native SQL predicates.
 
 3. **Output Constraints**:
@@ -20,12 +20,11 @@ You are an expert in SQL query decomposition. Your task is to convert a WHERE cl
 
 **Output Format**:
 A valid SQL WHERE clause string. Examples:
-- Original: `WHERE LLM("Is {gender} male AND {resume} mentions Huawei? -> {match: bool}")`
-- Optimized: `WHERE gender = 'male' AND LLM("Does {resume} mention Huawei? -> {match: bool}")`
+- Original: `WHERE LLM('Is {gender} male AND {resume} mentions Huawei? -> bool', people.gender, people.resume)`
+- Optimized: `WHERE people.gender = 'male' AND LLM('Does {resume} mention Huawei? -> bool', people.resume)`
 
 **Critical Rules**:
-- Never modify the LLM operator's output format (e.g., `-> {match: bool}` must be preserved).
-- Ensure column references in LLM prompts (e.g., `{resume}`) match actual column names.
+- Never modify the LLM operator's output format (e.g., `-> bool` must be preserved).
 - Use AND/OR logical operators exactly as in the original query.
 - Do not include any explanation or commentary in your output.
 """

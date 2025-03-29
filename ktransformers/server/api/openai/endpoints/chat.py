@@ -81,12 +81,15 @@ def data_query(request: Request, create: DataQueryCreate):
 
     try:
         if isinstance(data, list):
-            response = interface.data_query_batch(**create.dict())
+            response, performance = interface.data_query_batch(**create.dict())
             response = [parse_model_response(m) for m in response]
         else:
-            response = interface.data_query(**create.dict())
+            response, performance = interface.data_query(**create.dict())
             response = parse_model_response(response)
-        return JSONResponse(status_code=200, content={"status": "ok", "result": response})
+        return JSONResponse(
+            status_code=200,
+            content={"status": "ok", "result": response, "performance": performance},
+        )
     except Exception as e:
         stack_info = traceback.format_exc()
         logger.error(stack_info)

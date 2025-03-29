@@ -66,7 +66,6 @@ def _cache_prep(
     data_entry: str,
     system_cache: tuple = None,
 ):
-
     entry_ids = tokenizer.encode(data_entry, add_special_tokens=False)
 
     token_ids = torch.tensor(entry_ids, device=model.device).unsqueeze(0)
@@ -76,8 +75,5 @@ def _cache_prep(
         output = model(token_ids, past_key_values=past_key_values, use_cache=True)
 
     # remove system cache from past_key_values
-    data_cache = get_kv_cache_slice(
-        output.past_key_values, system_cache[0][0].shape[2], None
-    )
+    data_cache = get_kv_cache_slice(output.past_key_values, system_cache[0][0].shape[2], None)
     return data_cache
-

@@ -71,6 +71,13 @@ class BackendInterfaceBase:
                 f"\n\tPerformance(T/s): decode {decode_count/(data_query_time-prefill_time):.2f}."
                 f"\n\tTime(s): data_query {data_query_time:.2f}, prefill {prefill_time:.2f}."
             )
+            return {
+                "decode_count": decode_count,
+                "trie_hit_count": trie_hit_count,
+                "decode_rate": decode_count/(data_query_time-prefill_time),
+                "data_query_time": data_query_time,
+                "prefill_time": prefill_time,
+            }
         except:
             logger.info(f"Performance statistics not recorded")
 

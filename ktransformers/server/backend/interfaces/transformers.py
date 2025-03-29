@@ -15,6 +15,7 @@ from ktransformers.server.config.config import Config
 from ktransformers.server.schemas.base import ObjectID
 from ktransformers.server.utils.multi_timer import Profiler
 import io
+import time
 import torch
 import hashlib
 import sqlite3
@@ -27,6 +28,7 @@ from ..utils.cache import _cache_prep, _sys_cache_prep
 from ..utils.utils import load_data
 from ..response import (
     response_normal,
+    response_normal_with_system_cache,
     response_turbo_without_cache,
     response_turbo_with_system_cache,
     response_turbo_with_all_cache,
@@ -415,47 +417,112 @@ class TransformersInterface(BackendInterfaceBase):
         buffer.seek(0)
         return sqlite3.Binary(buffer.read())
 
-    def cache_prep(
-        self,
-        data: dict,
-        force_prep: bool = False,
-        conn: sqlite3.Connection = None,
-        cursor: sqlite3.Cursor = None,
-    ):
-        if conn is None or cursor is None:
-            conn = sqlite3.connect(self.cache_path)
-            cursor = conn.cursor()
+    def cache_prep(self, data: dict, system_cache=None):
+        """
+        Prepare cache for a single data entry without database operations.
+        Returns the hash key and cache data.
 
+        Args:
+            data: Data dictionary to prepare cache for
+            system_cache: Optional system cache to use (if None, uses self.system_cache)
+
+        Returns:
+            Tuple of (hash_key, data_cache)
+        """
         data_entry = json.dumps(data, ensure_ascii=False, sort_keys=True)
         data_hash_key = hashlib.sha256(data_entry.encode("utf-8")).hexdigest()
 
-        # 如果不是 force_prep 并且表中存在 key，则return
-        if not force_prep:
-            cursor.execute(
-                f"SELECT cache FROM `{self.model_name}` WHERE hash_key = '{data_hash_key}'"
-            )
-            result = cursor.fetchone()
-            if result:
-                return
+        # Use provided system_cache or the instance's system_cache
+        system_cache_to_use = system_cache if system_cache is not None else self.system_cache
 
+        # Prepare the cache
         data_cache = _cache_prep(
             model=self.model,
             tokenizer=self.tokenizer,
             data_entry=data_entry,
-            system_cache=self.system_cache,
+            system_cache=system_cache_to_use,
         )
 
-        cursor.execute(
-            f"INSERT INTO `{self.model_name}` (hash_key, cache) VALUES (?, ?)",
-            (data_hash_key, self.cache_to_blob(data_cache)),
-        )
-        conn.commit()
+        return data_hash_key, data_cache
 
-    def cache_prep_batch(self, data: list[dict], force_prep: bool = False):
+    def cache_prep_batch(
+        self, data: list[dict], force_prep: bool = False, commit_interval: int = 100
+    ):
+        """
+        Prepare cache for a batch of data entries using batch insertion for better performance.
+
+        Args:
+            data: List of data dictionaries to prepare cache for
+            force_prep: Whether to force preparation even if cache exists
+            commit_interval: Number of items to process before committing to the database
+        """
         conn = sqlite3.connect(self.cache_path)
         cursor = conn.cursor()
-        for d in tqdm(data):
-            self.cache_prep(d, force_prep, conn, cursor)
+
+        total_items = len(data)
+        batch_data = []
+        batch_count = 0
+        processed_count = 0
+
+        print(f"Processing {total_items} items in batches...")
+
+        # First pass: check which items need processing if not force_prep
+        items_to_process = []
+        if not force_prep:
+            for d in tqdm(data, desc="Checking existing entries"):
+                data_entry = json.dumps(d, ensure_ascii=False, sort_keys=True)
+                data_hash_key = hashlib.sha256(data_entry.encode("utf-8")).hexdigest()
+
+                cursor.execute(
+                    f"SELECT 1 FROM `{self.model_name}` WHERE hash_key = '{data_hash_key}'"
+                )
+                if not cursor.fetchone():
+                    items_to_process.append(d)
+
+            print(f"Found {len(items_to_process)}/{total_items} items that need processing")
+        else:
+            items_to_process = data
+            print(f"Force preparation enabled, processing all {total_items} items")
+
+        # Process items and insert in batches
+        for d in tqdm(items_to_process, desc="Preparing cache"):
+            # Calculate cache without database operations
+            data_hash_key, data_cache = self.cache_prep(d)
+
+            # Add to batch
+            batch_data.append((data_hash_key, self.cache_to_blob(data_cache)))
+            batch_count += 1
+            processed_count += 1
+
+            # Execute batch if we've reached the interval
+            if batch_count >= commit_interval:
+                start_time = time.time()
+                cursor.executemany(
+                    f"INSERT OR REPLACE INTO `{self.model_name}` (hash_key, cache) VALUES (?, ?)",
+                    batch_data,
+                )
+                end_time = time.time()
+                print(
+                    f"Inserted batch of {batch_count} items in {end_time - start_time:.2f} seconds"
+                )
+                conn.commit()
+                batch_data = []
+                batch_count = 0
+
+        # Insert any remaining items
+        if batch_data:
+            start_time = time.time()
+            cursor.executemany(
+                f"INSERT OR REPLACE INTO `{self.model_name}` (hash_key, cache) VALUES (?, ?)",
+                batch_data,
+            )
+            end_time = time.time()
+            print(
+                f"Inserted final batch of {batch_count} items in {end_time - start_time:.2f} seconds"
+            )
+            conn.commit()
+
+        print(f"Completed processing {processed_count}/{total_items} items")
 
     def data_query(
         self,
@@ -469,17 +536,23 @@ class TransformersInterface(BackendInterfaceBase):
         cursor: sqlite3.Cursor = None,
     ):
         response = None
-        if not use_turbo:
+        if not use_turbo and not use_cache:
             # logger.info("Using response_normal")
             response = response_normal(self, self.model, self.tokenizer, data, query, output_format)
             # print(res)
-        elif not use_cache:
-            logger.info("Using response_turbo_without_cache")
+        elif not use_turbo and use_cache and not is_full_data:
+            # logger.info("Using response_normal_with_system_cache")
+            response = response_normal_with_system_cache(
+                self, self.model, self.tokenizer, data, query, output_format, self.system_cache
+            )
+            # print(res)
+        elif use_turbo and not use_cache:
+            # logger.info("Using response_turbo_without_cache")
             response = response_turbo_without_cache(
                 self, self.model, self.tokenizer, data, query, output_format
             )
             # print(res)
-        elif not is_full_data:
+        elif use_turbo and use_cache and not is_full_data:
             # logger.info("Using response_turbo_with_system_cache")
             response = response_turbo_with_system_cache(
                 self,
@@ -491,7 +564,7 @@ class TransformersInterface(BackendInterfaceBase):
                 self.system_cache,
             )
             # print(res)
-        elif is_full_data:
+        elif use_turbo and use_cache and is_full_data:
             # logger.info("Using response_turbo_with_all_cache")
             data_entry = json.dumps(data, ensure_ascii=False, sort_keys=True)
 
@@ -522,7 +595,6 @@ class TransformersInterface(BackendInterfaceBase):
             #         (data_hash_key, self.cache_to_blob(data_cache)),
             #     )
             #     conn.commit()
-
             response = response_turbo_with_all_cache(
                 self,
                 self.model,
@@ -550,6 +622,8 @@ class TransformersInterface(BackendInterfaceBase):
         self.profiler.set_counter("decode", 0)
         self.profiler.set_counter("trie_hit", 0)
 
+        logger.info(f"use_turbo: {use_turbo}, use_cache: {use_cache}, is_full_data: {is_full_data}")
+
         conn = sqlite3.connect(self.cache_path)
         cursor = conn.cursor()
         response = []
@@ -560,5 +634,5 @@ class TransformersInterface(BackendInterfaceBase):
                 )
             )
         self.profiler.pause_timer("data_query")
-        self.report_last_time_performance()
-        return response
+        performance = self.report_last_time_performance()
+        return response, performance

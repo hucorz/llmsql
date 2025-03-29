@@ -1,8 +1,9 @@
 import os
 import json
+import time
 import torch
 from transformers import DynamicCache
-from .utils.utils import parse_user_format_fields, data_dumps
+from .utils.utils import parse_output_format_fields, data_dumps
 from .utils.prompts import (
     SYSTEM_PROMPT,
     USER_PROMPT,
@@ -77,7 +78,6 @@ def _generate(
         for idx in range(max_new_tokens):
             if idx == 0:
                 interface.profiler.start_timer("prefill")
-            # logger.info(f"\ncur response:\n{''.join(response)}")
             outputs = model(input_ids, past_key_values=past_key_values, use_cache=True)
             logits = outputs.logits
             next_token_id = int(torch.argmax(logits[:, -1, :], dim=-1))
@@ -100,8 +100,6 @@ def _generate(
                     response.append(generate_str)
             else:
                 input_ids = torch.tensor([next_token_id], device=model.device).unsqueeze(0)
-                # if "\n" in tokenizer.decode(next_token_id) or "\t" in tokenizer.decode(next_token_id):
-                #     print(repr(tokenizer.decode(next_token_id)))
                 response.append(tokenizer.decode(next_token_id))
             past_key_values = DynamicCache.from_legacy_cache(outputs.past_key_values)
             interface.profiler.inc("decode")
@@ -143,7 +141,7 @@ def generate_turbo(
         ==================
 
     """
-    output_format = parse_user_format_fields(output_format)
+    output_format = parse_output_format_fields(output_format)
     # print(output_format)
 
     for k, v in output_format.items():
@@ -219,6 +217,45 @@ def response_normal(
     # return tokenizer.decode(generated_tokens[0], skip_special_tokens=True)
 
 
+def response_normal_with_system_cache(
+    interface,
+    model,
+    tokenizer,
+    data: dict,
+    query: str,
+    output_format: str,
+    system_cache: tuple,
+    max_new_tokens: int = 200,
+):
+    """
+    cache content may like:
+    <|im_start|>system
+    ....
+    <|im_end|>
+    <|im_start|>user
+    [[## DATA ##]]
+    """
+    assert system_cache, "system_cache must be provided"
+
+    data_entry = json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+    input_str = USER_PROMPT_SUFFIX_WITH_DATA.format(
+        data_entry=data_entry, query=query, output_format=output_format
+    )
+    input_str += f"<|im_end|>\n<|im_start|>assistant\n"
+    inputs = tokenizer(input_str, return_tensors="pt").to(model.device)
+    return _generate(
+        interface,
+        model,
+        tokenizer,
+        inputs["input_ids"],
+        system_cache,
+        output_format,
+        max_new_tokens=max_new_tokens,
+        use_turbo=False,
+    )
+
+
 def response_turbo_without_cache(
     interface,
     model,
@@ -257,7 +294,7 @@ def response_turbo_with_system_cache(
     tokenizer,
     data: dict,
     query: str,
-    user_format: str,
+    output_format: str,
     system_cache: tuple,
     max_new_tokens: int = 200,
 ):
@@ -269,10 +306,12 @@ def response_turbo_with_system_cache(
     <|im_start|>user
     [[## DATA ##]]
     """
+    assert system_cache, "system_cache must be provided"
+
     data_entry = json.dumps(data, ensure_ascii=False, sort_keys=True)
 
     input_str = USER_PROMPT_SUFFIX_WITH_DATA.format(
-        data_entry=data_entry, query=query, output_format=user_format
+        data_entry=data_entry, query=query, output_format=output_format
     )
     input_str += f"<|im_end|>\n<|im_start|>assistant\n"
     return generate_turbo(
@@ -280,7 +319,7 @@ def response_turbo_with_system_cache(
         model,
         tokenizer,
         input_str,
-        user_format,
+        output_format,
         system_cache,
         max_new_tokens=max_new_tokens,
     )
@@ -291,7 +330,7 @@ def response_turbo_with_all_cache(
     model,
     tokenizer,
     query: str,
-    user_format: str,
+    output_format: str,
     system_cache: tuple,
     data_cache: tuple,
     max_new_tokens: int = 200,
@@ -306,8 +345,9 @@ def response_turbo_with_all_cache(
     ...
     ...
     """
+    assert system_cache and data_cache, "system_cache and data_cache must be provided"
 
-    user_prompt = USER_PROMPT_SUFFIX.format(query=query, output_format=user_format)
+    user_prompt = USER_PROMPT_SUFFIX.format(query=query, output_format=output_format)
 
     input_str = "\n" + user_prompt + f"<|im_end|>\n<|im_start|>assistant\n"
     return generate_turbo(
@@ -315,7 +355,7 @@ def response_turbo_with_all_cache(
         model,
         tokenizer,
         input_str,
-        user_format,
+        output_format,
         merge_kv_caches([system_cache, data_cache]),
         max_new_tokens=max_new_tokens,
     )

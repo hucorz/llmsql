@@ -1,11 +1,9 @@
 import json
 import re
-import random
 import duckdb
 from duckdb import DuckDBPyConnection
-
-from llmsql import REGISTERED_MODEL, REGISTERED_API_MODEL
-from llmsql.duckdb.prompts import DECOMPOSITION_SYSTEM_PROMPT
+from duckdb.typing import VARCHAR
+from llmsql import REGISTERED_MODEL
 from llmsql.duckdb.rewriter import rewrite_sql
 from llmsql.duckdb.udf import (
     llm_udf,
@@ -25,8 +23,8 @@ def override_sql(sql_query: str):
 
 
 duckdb.sql = override_sql
-duckdb.create_function("LLM", llm_udf)
-duckdb.create_function("LLM_FILTER", llm_udf_filter)
+duckdb.create_function("LLM", llm_udf, return_type=VARCHAR, type="arrow")
+duckdb.create_function("LLM_FILTER", llm_udf_filter, return_type=VARCHAR, type="arrow")
 
 
 # Override duckdb.connect(...); conn.execute
@@ -37,8 +35,8 @@ original_connection_sql = duckdb.DuckDBPyConnection.sql
 
 def override_connect(*args, **kwargs):
     connection = original_connect(*args, **kwargs)
-    connection.create_function("LLM", llm_udf)
-    connection.create_function("LLM_FILTER", llm_udf_filter)
+    connection.create_function("LLM", llm_udf, return_type=VARCHAR, type="arrow")
+    connection.create_function("LLM_FILTER", llm_udf_filter, return_type=VARCHAR, type="arrow")
     return connection
 
 

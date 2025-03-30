@@ -49,13 +49,12 @@ def merge_select_llm_expressions(llm_expressions: list[str], output_fields: list
 
     assert query_parts and output_types
     assert len(query_parts) == len(output_types)
-    assert len(query_parts) == len(data_fields)
     assert len(output_types) == len(output_fields)
 
     # Combine queries with Q1, Q2, etc. prefixes
     merged_query = " ".join([f"Q{i+1}: {query_parts[i]}" for i in range(len(query_parts))])
     merged_output_format = ", ".join(
-        [f"{{'{output_fields[i]}': '{output_types[i]}'}}" for i in range(len(output_types))]
+        [f"{{{output_fields[i]}: {output_types[i]}}}" for i in range(len(output_types))]
     )
     merged_data_fields = ", ".join(data_fields)
 

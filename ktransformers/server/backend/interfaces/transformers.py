@@ -526,15 +526,18 @@ class TransformersInterface(BackendInterfaceBase):
 
     def data_query(
         self,
-        data: dict,
+        data: list[dict],
         query: str,
         output_format: str,
         use_turbo: bool = True,
         use_cache: bool = False,
         is_full_data: bool = False,
+        vectorization_stride: int = 1,
         conn: sqlite3.Connection = None,
         cursor: sqlite3.Cursor = None,
     ):
+        for idx in range(len(data)):
+            data[idx]["id"] = idx + 1
         response = None
         if not use_turbo and not use_cache:
             # logger.info("Using response_normal")
@@ -549,7 +552,7 @@ class TransformersInterface(BackendInterfaceBase):
         elif use_turbo and not use_cache:
             # logger.info("Using response_turbo_without_cache")
             response = response_turbo_without_cache(
-                self, self.model, self.tokenizer, data, query, output_format
+                self, self.model, self.tokenizer, data, query, output_format, vectorization_stride
             )
             # print(res)
         elif use_turbo and use_cache and not is_full_data:
@@ -562,9 +565,11 @@ class TransformersInterface(BackendInterfaceBase):
                 query,
                 output_format,
                 self.system_cache,
+                vectorization_stride,
             )
             # print(res)
         elif use_turbo and use_cache and is_full_data:
+            assert vectorization_stride == 1, "cannot use vectorization when using data cache"
             # logger.info("Using response_turbo_with_all_cache")
             data_entry = json.dumps(data, ensure_ascii=False, sort_keys=True)
 
@@ -604,6 +609,7 @@ class TransformersInterface(BackendInterfaceBase):
                 self.system_cache,
                 data_cache,
             )
+        # print(response)
         return response
 
     def data_query_batch(
@@ -614,6 +620,7 @@ class TransformersInterface(BackendInterfaceBase):
         use_turbo: bool = True,
         use_cache: bool = False,
         is_full_data: bool = False,
+        vectorization_stride: int = 1,
         conn: sqlite3.Connection = None,
         cursor: sqlite3.Cursor = None,
     ):
@@ -627,10 +634,19 @@ class TransformersInterface(BackendInterfaceBase):
         conn = sqlite3.connect(self.cache_path)
         cursor = conn.cursor()
         response = []
-        for d in tqdm(data):
+        for start_idx in tqdm(range(0, len(data), vectorization_stride)):
+            end_idx = min(start_idx + vectorization_stride, len(data))
             response.append(
                 self.data_query(
-                    d, query, output_format, use_turbo, use_cache, is_full_data, conn, cursor
+                    data[start_idx:end_idx],
+                    query,
+                    output_format,
+                    use_turbo,
+                    use_cache,
+                    is_full_data,
+                    vectorization_stride,
+                    conn,
+                    cursor,
                 )
             )
         self.profiler.pause_timer("data_query")

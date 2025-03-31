@@ -3,7 +3,6 @@ import re
 import duckdb
 from duckdb import DuckDBPyConnection
 from duckdb.typing import VARCHAR
-from llmsql import REGISTERED_MODEL
 from llmsql.duckdb.rewriter import rewrite_sql
 from llmsql.duckdb.udf import (
     llm_udf,

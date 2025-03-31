@@ -66,24 +66,8 @@ true
 ---
 """
 
-
 USER_PROMPT = """
 [[## DATA ##]]
-{data_entry}
-[[## QUERY ##]]
-{query}
-[[## FORMAT ##]]
-{output_format}
-"""
-
-USER_PROMPT_SUFFIX = """
-[[## QUERY ##]]
-{query}
-[[## FORMAT ##]]
-{output_format}
-"""
-
-USER_PROMPT_SUFFIX_WITH_DATA = """
 {data_entry}
 [[## QUERY ##]]
 {query}

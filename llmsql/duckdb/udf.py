@@ -1,11 +1,13 @@
 import re
 import json
+import traceback
 import random
 import pandas as pd
 import pyarrow as pa
-from llmsql import REGISTERED_MODEL
+from concurrent.futures import ThreadPoolExecutor
+from llmsql import GlobalEntryPoint
 
-assert REGISTERED_MODEL, "REGISTERED_MODEL must be valid"
+assert GlobalEntryPoint, "GlobalEntryPoint must be valid"
 
 
 def llm_udf(query: pa.Array, *args) -> str:
@@ -15,8 +17,14 @@ def llm_udf(query: pa.Array, *args) -> str:
     query_part, output_format, fields = parse_query(query)
     data = {field: arg for field, arg in zip(fields, args)}
     data = pd.DataFrame(data).to_dict(orient="records")
-    output = REGISTERED_MODEL.execute(data=data, query=query_part, output_format=output_format)
-    output = [json.dumps(item) for item in output]
+    output = GlobalEntryPoint.query(
+        data=data,
+        query=query_part,
+        output_format=output_format,
+        use_turbo=True,
+        use_cache=True,
+        is_full_data=False,
+    )
     return pa.array(output)
 
 
@@ -27,10 +35,10 @@ def llm_udf_filter(query: str, *args) -> bool:
     query_part, output_format, fields = parse_query(query)
     data = {field: arg for field, arg in zip(fields, args)}
     data = pd.DataFrame(data).to_dict(orient="records")
-    output = REGISTERED_MODEL.execute(
+    output = GlobalEntryPoint.query(
         data=data, query=query_part, output_format="{true_or_false: bool}"
     )
-    output = [list(item.values())[0] for item in output]
+    output = [list(json.loads(item).values())[0] for item in output]
     # TODO output here is a list of 'true' or 'false', but it works
     # duckdb will transform to bool automatically?
     return pa.array(output)

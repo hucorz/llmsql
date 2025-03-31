@@ -1,14 +1,10 @@
 import sys
-
-sys.path.append("/fs/fast/u20247643/llmsql")
-
 import json
 import re
 import random
 import duckdb
 from duckdb import DuckDBPyConnection
-
-from llmsql.duckdb.prompts import DECOMPOSITION_SYSTEM_PROMPT
+from ..logger import logger
 
 
 def wrap_sql_to_extract_json_object(sql_query: str, output_fields: list[tuple[str, str]]) -> str:
@@ -22,7 +18,7 @@ def wrap_sql_to_extract_json_object(sql_query: str, output_fields: list[tuple[st
             for field, function_type in output_fields
         ]
     )
-    return f"SELECT\n{output_fields_sql}\nFROM ({sql_query});"
+    return f"SELECT\n  {output_fields_sql}\nFROM ({sql_query});"
 
 
 def merge_select_llm_expressions(llm_expressions: list[str], output_fields: list[str]) -> str:
@@ -64,29 +60,26 @@ def merge_select_llm_expressions(llm_expressions: list[str], output_fields: list
 def segment_select_clause(select_clause: str) -> str:
     select_clause = select_clause[6:]
 
-    udf_pattern = r"(\w+\([^)]*\))\s+AS\s+(\w+)"  # 匹配 UDF 函数及别名
+    udf_pattern = r"(\w+\([^)]*\)\s+AS\s+\w+)"  # 匹配 UDF 函数及别名
     udf_matches = re.findall(udf_pattern, select_clause)
 
-    fields = []
-    for match in udf_matches:
-        udf_function, alias = match
-        fields.append(f"{udf_function} AS {alias}")
-
+    all_segments = udf_matches
     sql_query_no_udf = re.sub(udf_pattern, "", select_clause)
-    sql_query_no_select = sql_query_no_udf.replace("SELECT", "").strip()
-    fields.extend([field.strip() for field in sql_query_no_select.split(",")])
-    fields = [field for field in fields if field]
-    return fields
+
+    all_segments.extend([field.strip() for field in sql_query_no_udf.split(",")])
+    all_segments = [seg for seg in all_segments if seg]
+    all_segments.sort(key=lambda seg: select_clause.find(seg))
+    return all_segments
 
 
 def rewrite_select_clause(select_clause: str) -> str:
     # get raw output fields
-    raw_clause_segment = segment_select_clause(select_clause)
-    raw_function_types = ["llm" if "LLM('" in field else "normal" for field in raw_clause_segment]
+    all_segments = segment_select_clause(select_clause)
+    raw_fields_types = ["llm" if "LLM('" in seg else "normal" for seg in all_segments]
     raw_output_fields = [
-        field if "AS" not in field else field.split("AS")[1].strip() for field in raw_clause_segment
+        field if "AS" not in field else field.split("AS")[1].strip() for field in all_segments
     ]
-    raw_output_fields = list(zip(raw_output_fields, raw_function_types))
+    raw_output_fields = list(zip(raw_output_fields, raw_fields_types))
 
     # rewrite LLM expressions
     select_llm_matches = list(re.finditer(r"LLM\(.*?\)(\s+AS\s+\w+)?", select_clause))
@@ -111,28 +104,15 @@ def rewrite_select_clause(select_clause: str) -> str:
         merged_llm_expressions = merge_select_llm_expressions(llm_expressions, output_fields)
         merged_llm_expressions = f"{merged_llm_expressions} AS json_output"
 
-        # Remove all LLM expressions from the select clause
-        patterns_to_remove = []
-        for match in select_llm_matches:
-            escaped_match = re.escape(match.group(0))
-            patterns_to_remove.append(f"{escaped_match},\\s*")
-            patterns_to_remove.append(f"\\s*,{escaped_match}")
-            patterns_to_remove.append(escaped_match)
-
-        modified_select = select_clause
-        for pattern in patterns_to_remove:
-            modified_select = re.sub(r"LLM\(.*?\)(\s+AS\s+\w+)?", "", modified_select)
-
-        # Clean up the select clause
-        select_items = [item.strip() for item in modified_select.split(",")]
-        select_items = [item for item in select_items if item]
-
-        # Rebuild the select clause with proper commas
-        clean_select = ", ".join(select_items)
-        if len(clean_select) == len("SELECT"):
-            return f"{clean_select} {merged_llm_expressions}", raw_output_fields
-        else:
-            return f"{clean_select}, {merged_llm_expressions}", raw_output_fields
+        normal_segments = [
+            all_segments[idx]
+            for idx in range(len(raw_fields_types))
+            if raw_fields_types[idx] == "normal"
+        ]
+        rebuild_sql = f"SELECT\n  "
+        rebuild_sql += ",\n  ".join(normal_segments)
+        rebuild_sql += ",\n  " + merged_llm_expressions
+        return rebuild_sql, raw_output_fields
     else:
         return select_clause, raw_output_fields
 
@@ -143,9 +123,9 @@ def rewrite_where_clause(where_clause: str) -> str:
         {"role": "system", "content": DECOMPOSITION_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
-    from llmsql.llm import APIModel
+    from llmsql import GlobalEntryPoint
 
-    response = APIModel().query(messages)
+    response = GlobalEntryPoint.chat(messages)
 
     llm_pattern = r"LLM\(\s*([\'])(.*?)\1.*?\)"
 
@@ -165,16 +145,22 @@ def rewrite_sql(sql_query: str) -> str:
     # if not select clause, return original sql
     if not extract_sql_clause(sql_query, "SELECT"):
         return sql_query
+
+    rewritten_sql = sql_query
     """Intercepts DuckDB SQL query string and outputs an updated query."""
     raw_select_clause = extract_sql_clause(sql_query, "SELECT")
-    select_clause, output_fields = rewrite_select_clause(raw_select_clause)
+    if raw_select_clause:
+        select_clause, output_fields = rewrite_select_clause(raw_select_clause)
+        rewritten_sql = sql_query.replace(raw_select_clause, select_clause)
 
     raw_where_clause = extract_sql_clause(sql_query, "WHERE")
-    where_clause = rewrite_where_clause(raw_where_clause)
+    if raw_where_clause:
+        where_clause = rewrite_where_clause(raw_where_clause)
+        rewritten_sql = rewritten_sql.replace(raw_where_clause, where_clause)
 
-    rewritten_sql = sql_query.replace(raw_select_clause, select_clause)
-    rewritten_sql = rewritten_sql.replace(raw_where_clause, where_clause)
     rewritten_sql = wrap_sql_to_extract_json_object(rewritten_sql, output_fields)
+
+    logger.info(f"Rewrited SQL:\n{rewritten_sql}")
 
     return rewritten_sql
 
@@ -230,6 +216,37 @@ def extract_sql_clause(sql_query: str, clause_type: str) -> str:
     return ""
 
 
+DECOMPOSITION_SYSTEM_PROMPT = """
+You are an expert in SQL query decomposition. Your task is to convert a WHERE clause containing LLM operators into an optimized SQL WHERE clause that separates structured predicates (executable by native SQL) from unstructured predicates (requiring LLM processing). The output must be a valid SQL WHERE clause string.
+
+**Inputs**:
+- `input_where_clause`: Original WHERE clause with LLM operators (e.g., `WHERE LLM(...)`)
+
+**Requirements**:
+1. **Predicate Decomposition**:
+   - Identify conditions that can be evaluated using native SQL (e.g., `gender = 'male'`, `age > 30`).
+   - Extract these conditions and place them BEFORE LLM predicates in the WHERE clause to leverage SQL's short-circuit evaluation.
+
+2. **LLM Operator Handling**:
+   - Keep only the text analysis tasks in the LLM operator (e.g., `LLM('Does {resume} mention Huawei? -> bool', people.resume)`).
+   - Remove any conditions from the LLM operator that have already been handled by native SQL predicates.
+
+3. **Output Constraints**:
+   - The final WHERE clause must preserve logical equivalence to the original query.
+   - If no decomposition is possible, return the original WHERE clause unchanged.
+   - If all conditions can be handled by SQL, omit the LLM operator entirely.
+
+**Output Format**:
+A valid SQL WHERE clause string. Examples:
+- Original: `WHERE LLM('Is {gender} male AND {resume} mentions Huawei? -> bool', people.gender, people.resume)`
+- Optimized: `WHERE people.gender = 'male' AND LLM('Does {resume} mention Huawei? -> bool', people.resume)`
+
+**Critical Rules**:
+- Never modify the LLM operator's output format (e.g., `-> bool` must be preserved).
+- Use AND/OR logical operators exactly as in the original query.
+- Do not include any explanation or commentary in your output.
+"""
+
 if __name__ == "__main__":
     origin_sql = """
 SELECT
@@ -237,6 +254,6 @@ SELECT
   LLM('Analyze {abstract} for AI relevance? -> bool', p.abstract) AS is_AI,
   LLM('Check {title} for math terminology? -> bool', p.title) AS has_math
 FROM papers as p
-WHERE LLM("{update_date} 时间为 2000-2009的论文的 {abstract} 是否和 AI 相关? -> bool", p.date, p.abstract)
+WHERE LLM('{update_date} 时间为 2000-2009的论文的 {abstract} 是否和 AI 相关? -> bool', p.date, p.abstract)
 """
     print(rewrite_sql(origin_sql))

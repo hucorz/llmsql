@@ -4,7 +4,10 @@ import traceback
 import random
 import pandas as pd
 import pyarrow as pa
+from collections import OrderedDict
+import llmsql
 from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 from .prompts import SYSTEM_PROMPT, USER_PROMPT
 from ..logger import logger
 
@@ -26,36 +29,43 @@ class LLMEntryPoint:
         use_cache: bool = True,
         is_full_data: bool = False,
     ):
-        from llmsql import vectorize, vectorization_stride
-
+        logger.info(
+            f"LLMEntryPoint query (VECTORIZE:{llmsql.VECTORIZE}, vectorization_stride:{llmsql.VECTORIZATION_STRIDE}) Start"
+        )
         try:
-            if not vectorize:
+            if not llmsql.VECTORIZE:
                 output = self.llm.query(data=data, query=query, output_format=output_format)
             else:
-                if vectorization_stride == 0:
-                    optimal_stride, partial_output = get_optimal_stride(
-                        self.api_model, query, output_format, data
+                if llmsql.VECTORIZATION_STRIDE == 0:
+                    llmsql.VECTORIZATION_STRIDE, partial_output = get_optimal_stride(
+                        self.api_model,
+                        query,
+                        output_format,
+                        data,
                     )
                 else:
-                    optimal_stride, partial_output = vectorization_stride, []
+                    partial_output = []
+
+                print(f"optimal_stride: {llmsql.VECTORIZATION_STRIDE}")
+                return
                 data = data[len(partial_output) :]
                 output = partial_output
                 output.extend(
-                    query_with_stride(self.api_model, data, query, output_format, optimal_stride)
+                    query_with_stride(
+                        self.api_model, data, query, output_format, llmsql.VECTORIZATION_STRIDE
+                    )
                 )
             output = [json.dumps(item) for item in output]
         except Exception as e:
             traceback.print_exc()
             raise e
         logger.info(
-            f"LLMEntryPoint query (vectorize:{vectorize}, vectorization_stride:{vectorization_stride}) Complete"
+            f"LLMEntryPoint query (VECTORIZE:{llmsql.VECTORIZE}, vectorization_stride:{llmsql.VECTORIZATION_STRIDE}) Complete"
         )
         return output
 
     def chat(self, messages: list[dict[str, str]]):
-        from llmsql import vectorize
-
-        if not vectorize:
+        if not llmsql.VECTORIZE:
             response = self.llm.chat(messages)
         else:
             response = self.api_model.chat(messages)
@@ -64,40 +74,51 @@ class LLMEntryPoint:
 
 
 def get_optimal_stride(model, query: str, output_format: str, data: list[dict[str, str]]):
-    data_nums = len(data)
-    if data_nums < 5000:
-        return 1, []
-    sample_data = data[: data_nums // 50]
+    data_length = len(data)
+    # if data_length < 2048:  # actually, duckdb's max rows is 2048 when using arrow mode udf
+    #     return 1, []
+    # sample_data = data[: data_length // 8]
+    sample_data = data[:256]
 
     strides = [1, 2, 4, 8]
 
-    # 存储每个 stride 的结果
     results = {}
     accuracies = {}
 
-    # 首先，获取 stride=1 的基准结果
+    logger.info(f"Starting optimal stride determination with {len(sample_data)} sample data points")
+
+    # stride=1 baseline
     print(f"Testing with stride=1 (baseline)...")
     baseline_results = query_with_stride(model, sample_data, query, output_format, 1)
     results[1] = baseline_results
-    accuracies[1] = 100.0  # 基准准确率为 100%
+    accuracies[1] = 100.0
 
-    # 测试其他 stride 值
-    for stride in strides[1:]:  # 跳过 stride=1，因为已经测试过了
+    # test other stride
+    for stride in strides[1:]:
         print(f"Testing with stride={stride}...")
         stride_results = query_with_stride(model, sample_data, query, output_format, stride)
         results[stride] = stride_results
 
-        # 计算与基准相比的准确率
         accuracy = calculate_accuracy(baseline_results, stride_results)
         accuracies[stride] = accuracy
+
+        logger.info(f"Stride={stride} accuracy: {accuracy:.2f}%")
+
         print(f"Stride={stride} accuracy: {accuracy:.2f}%")
 
-    # 找到准确率 >= 95% 的最大 stride
-    optimal_stride = 1  # 默认为 1
+    # find optimal stride
+    optimal_stride = 1
     for stride in sorted(strides, reverse=True):
         if accuracies[stride] >= 95.0:
             optimal_stride = stride
             break
+
+    logger.info(
+        f"All stride accuracies: {json.dumps({s: round(accuracies[s], 2) for s in accuracies})}"
+    )
+    logger.info(
+        f"Optimal stride selected: {optimal_stride} (accuracy: {accuracies[optimal_stride]:.2f}%)"
+    )
 
     print(f"Optimal stride: {optimal_stride} (accuracy: {accuracies[optimal_stride]:.2f}%)")
     return optimal_stride, results[optimal_stride]
@@ -105,8 +126,9 @@ def get_optimal_stride(model, query: str, output_format: str, data: list[dict[st
 
 def process_batch(model, batch, query, output_format):
     for idx in range(len(batch)):
-        batch[idx]["idx"] = idx + 1
-    data_entry = "\n".join([json.dumps(item, ensure_ascii=False, sort_keys=True) for item in batch])
+        batch[idx] = OrderedDict([("id", idx + 1)] + list(batch[idx].items()))  # id must be first
+
+    data_entry = "\n".join([json.dumps(item, ensure_ascii=False) for item in batch])
 
     user_prompt = USER_PROMPT.format(
         data_entry=data_entry, query=query, output_format=output_format
@@ -117,11 +139,16 @@ def process_batch(model, batch, query, output_format):
         {"role": "user", "content": user_prompt},
     ]
 
+    # print("===" * 10)
+    # print(SYSTEM_PROMPT)
+    # print("===" * 10)
+    # print(user_prompt)
+
     response = model.chat(messages)
     return parse_response(response, len(batch))
 
 
-def query_with_stride(model, data, query, output_format, stride, max_workers=25):
+def query_with_stride(model, data, query, output_format, stride, max_workers=10):
     results = []
     batches = []
 
@@ -129,18 +156,23 @@ def query_with_stride(model, data, query, output_format, stride, max_workers=25)
         batch = data[i : min(i + stride, len(data))]
         batches.append(batch)
 
+    total_batches = len(batches)
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         batch_results = list(
-            executor.map(
-                lambda batch: process_batch(model, batch, query, output_format),
-                batches,
+            tqdm(
+                executor.map(
+                    lambda batch: process_batch(model, batch, query, output_format),
+                    batches,
+                ),
+                total=total_batches,
+                desc=f"Processing batches (stride={stride})",
+                unit="batch",
             )
         )
-    logger.info(f"query_with_stride: invoke {len(batch_results)} times")
 
     for batch_result in batch_results:
         results.extend(batch_result)
-    print(results)
 
     return results
 

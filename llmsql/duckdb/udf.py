@@ -11,9 +11,8 @@ assert GlobalEntryPoint, "GlobalEntryPoint must be valid"
 
 
 def llm_udf(query: pa.Array, *args) -> str:
-    query = query.to_pylist()
+    query = str(query.to_pylist()[0])
     args = [arg.to_pylist() for arg in args]
-    query = str(query[0])
     query_part, output_format, fields = parse_query(query)
     data = {field: arg for field, arg in zip(fields, args)}
     data = pd.DataFrame(data).to_dict(orient="records")
@@ -28,10 +27,9 @@ def llm_udf(query: pa.Array, *args) -> str:
     return pa.array(output)
 
 
-def llm_udf_filter(query: str, *args) -> bool:
-    query = query.to_pylist()
+def llm_udf_filter(query: pa.Array, *args) -> bool:
+    query = str(query.to_pylist()[0])
     args = [arg.to_pylist() for arg in args]
-    query = str(query[0])
     query_part, output_format, fields = parse_query(query)
     data = {field: arg for field, arg in zip(fields, args)}
     data = pd.DataFrame(data).to_dict(orient="records")

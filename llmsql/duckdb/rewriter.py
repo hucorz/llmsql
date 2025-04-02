@@ -3,6 +3,7 @@ import json
 import re
 import random
 import duckdb
+import llmsql
 from duckdb import DuckDBPyConnection
 from ..logger import logger
 
@@ -27,7 +28,7 @@ def merge_select_llm_expressions(llm_expressions: list[str], output_fields: list
     for expr in llm_expressions:
         content = expr[4:-1]  # Remove 'LLM(' and ')'
         # query may contains "," so use regex to extract
-        query_field = re.search(r"\'(.*?)\'", content).group(1)
+        query_field = re.search(r"'((?:[^']|'{2})*)'", content).group(1)
         content = content.replace(f"'{query_field}'", "")  # Remove the query field
         query_fields.append(query_field.strip())
         data_fields.extend([field.strip() for field in content.split(",")[1:]])
@@ -43,6 +44,10 @@ def merge_select_llm_expressions(llm_expressions: list[str], output_fields: list
             query_parts.append(query)
             output_types.append(output_format)
 
+    print(f"Query parts: {query_parts}")
+    print(f"Output types: {output_types}")
+    print(f"Output fields: {output_fields}")
+
     assert query_parts and output_types
     assert len(query_parts) == len(output_types)
     assert len(output_types) == len(output_fields)
@@ -50,7 +55,7 @@ def merge_select_llm_expressions(llm_expressions: list[str], output_fields: list
     # Combine queries with Q1, Q2, etc. prefixes
     merged_query = " ".join([f"Q{i+1}: {query_parts[i]}" for i in range(len(query_parts))])
     merged_output_format = ", ".join(
-        [f"{{{output_fields[i]}: {output_types[i]}}}" for i in range(len(output_types))]
+        [f'{{ "{output_fields[i]}": {output_types[i]} }}' for i in range(len(output_types))]
     )
     merged_data_fields = ", ".join(data_fields)
 
@@ -60,7 +65,7 @@ def merge_select_llm_expressions(llm_expressions: list[str], output_fields: list
 def segment_select_clause(select_clause: str) -> str:
     select_clause = select_clause[6:]
 
-    udf_pattern = r"(\w+\([^)]*\)\s+AS\s+\w+)"  # 匹配 UDF 函数及别名
+    udf_pattern = r"(\w+\((?:[^()]*|\([^()]*\))*\)\s+AS\s+\w+)"  # 匹配 UDF 函数及别名
     udf_matches = re.findall(udf_pattern, select_clause)
 
     all_segments = udf_matches
@@ -69,6 +74,7 @@ def segment_select_clause(select_clause: str) -> str:
     all_segments.extend([field.strip() for field in sql_query_no_udf.split(",")])
     all_segments = [seg for seg in all_segments if seg]
     all_segments.sort(key=lambda seg: select_clause.find(seg))
+    print(f"All segments({len(all_segments)}): {all_segments}")
     return all_segments
 
 
@@ -82,15 +88,17 @@ def rewrite_select_clause(select_clause: str) -> str:
     raw_output_fields = list(zip(raw_output_fields, raw_fields_types))
 
     # rewrite LLM expressions
-    select_llm_matches = list(re.finditer(r"LLM\(.*?\)(\s+AS\s+\w+)?", select_clause))
+    select_llm_matches = list(
+        re.finditer(r"LLM\((?:[^()]*|\([^()]*\))*\)(\s+AS\s+\w+)?", select_clause)
+    )
 
-    if len(select_llm_matches) > 1:
+    if len(select_llm_matches) > 0:
         llm_expressions = []
         output_fields = []
 
         for match in select_llm_matches:
             full_match = match.group(0)
-            llm_expr = re.search(r"LLM\(.*?\)", full_match).group(0)
+            llm_expr = re.search(r"LLM\((?:[^()]*|\([^()]*\))*\)", full_match).group(0)
             llm_expressions.append(llm_expr)
 
             # Check for AS clause
@@ -101,6 +109,10 @@ def rewrite_select_clause(select_clause: str) -> str:
             else:
                 output_fields.append("")
 
+        for i in range(len(llm_expressions)):
+            print(llm_expressions[i])
+            print(output_fields[i])
+        print("------------------")
         merged_llm_expressions = merge_select_llm_expressions(llm_expressions, output_fields)
         merged_llm_expressions = f"{merged_llm_expressions} AS json_output"
 
@@ -109,9 +121,16 @@ def rewrite_select_clause(select_clause: str) -> str:
             for idx in range(len(raw_fields_types))
             if raw_fields_types[idx] == "normal"
         ]
+        # print(f"Normal segments")
+        # for seg in normal_segments:
+        #     print(seg)
+        # print("------------------")
         rebuild_sql = f"SELECT\n  "
         rebuild_sql += ",\n  ".join(normal_segments)
-        rebuild_sql += ",\n  " + merged_llm_expressions
+        if len(normal_segments) > 0:
+            rebuild_sql += ",\n  " + merged_llm_expressions
+        else:
+            rebuild_sql += merged_llm_expressions
         return rebuild_sql, raw_output_fields
     else:
         return select_clause, raw_output_fields
@@ -141,14 +160,60 @@ def rewrite_where_clause(where_clause: str) -> str:
     return final_response
 
 
+def get_table_row_count(from_clause: str) -> int:
+    def extract_table_names(from_clause: str) -> list[str]:
+        from_clause = from_clause.strip()[5:].strip()
+
+        parts = [p.strip() for p in from_clause.split(",")]
+        table_names = []
+        for part in parts:
+            if not part:
+                continue
+            table_name = part.split(" ")[0].strip()
+            table_names.append(table_name)
+
+        return table_names
+
+    try:
+        from llmsql.duckdb import active_connection
+
+        if active_connection is None:
+            logger.warning("No active DuckDB connection found")
+            return 0
+
+        table_names = extract_table_names(from_clause)
+        table_name = table_names[0]
+
+        result = active_connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+
+        row_count = result[0] if result else 0
+        logger.info(f"Table {table_name} has {row_count} rows")
+        return row_count
+    except Exception as e:
+        logger.warning(f"Failed to get row count for table: {e}")
+        import traceback
+
+        logger.warning(traceback.format_exc())
+        return 0
+
+
 def rewrite_sql(sql_query: str) -> str:
     # if not select clause, return original sql
     if not extract_sql_clause(sql_query, "SELECT"):
         return sql_query
 
+    if not re.search(r"LLM\(.*?\)", sql_query):
+        return sql_query
+
     rewritten_sql = sql_query
     """Intercepts DuckDB SQL query string and outputs an updated query."""
     raw_select_clause = extract_sql_clause(sql_query, "SELECT")
+
+    # get table row counts
+    llmsql.VECTORIZATION_STRIDE = 0
+    # raw_from_clause = extract_sql_clause(sql_query, "FROM")
+    # total_rows = get_table_row_count(raw_from_clause)
+
     if raw_select_clause:
         select_clause, output_fields = rewrite_select_clause(raw_select_clause)
         rewritten_sql = sql_query.replace(raw_select_clause, select_clause)

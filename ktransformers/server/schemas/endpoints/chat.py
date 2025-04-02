@@ -95,3 +95,4 @@ class DataQueryCreate(BaseModel):
     use_turbo: bool = True
     use_cache: bool = False
     is_full_data: bool = False
+    vectorization_stride: int = 1

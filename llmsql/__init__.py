@@ -1,11 +1,13 @@
-from .llm import LLM
+from .llm import LLM, LLMEntryPoint
 from .pandas import LLMQuery
 
-REGISTERED_MODEL = None
+GlobalEntryPoint = None
+VECTORIZE: bool = False
+VECTORIZATION_STRIDE = 1
 
 
-def init(llm: LLM):
+def init(llm: LLM = None):
     """Configure LLM at package level"""
-    global REGISTERED_MODEL
-    REGISTERED_MODEL = llm
+    global GlobalEntryPoint
+    GlobalEntryPoint = LLMEntryPoint()
     LLMQuery._llm = llm

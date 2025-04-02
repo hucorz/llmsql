@@ -3,17 +3,19 @@ import re
 import duckdb
 from duckdb import DuckDBPyConnection
 from duckdb.typing import VARCHAR
-from llmsql import REGISTERED_MODEL
 from llmsql.duckdb.rewriter import rewrite_sql
 from llmsql.duckdb.udf import (
     llm_udf,
     llm_udf_filter,
 )
 
+# 添加一个全局变量来存储当前活跃的连接
+active_connection = None
+
 # if REGISTERED_MODEL is None:
 #     raise RuntimeError("Call llmsql.init before importing from llmsql.duckdb")
 
-# Override duckdb.sql(...)
+# Override duckdb.sql(...)˚
 original_sql_fn = duckdb.sql
 
 
@@ -34,9 +36,11 @@ original_connection_sql = duckdb.DuckDBPyConnection.sql
 
 
 def override_connect(*args, **kwargs):
+    global active_connection
     connection = original_connect(*args, **kwargs)
     connection.create_function("LLM", llm_udf, return_type=VARCHAR, type="arrow")
     connection.create_function("LLM_FILTER", llm_udf_filter, return_type=VARCHAR, type="arrow")
+    active_connection = connection  # 存储当前活跃的连接
     return connection
 
 
